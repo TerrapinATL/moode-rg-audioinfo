@@ -29,12 +29,14 @@ loudgain-tagged formats are covered.
 
 ## Compatibility
 
-* Patch anchors verified byte-identical on moOde **r942** (current release) and
-  the develop branch. The script auto-detects which path-quoting style the
-  installed version uses (`escapeDblQuotes()` exists only in newer versions)
-  and generates the matching code.
+* Patch anchors verified byte-identical on moOde **r942**, **10.2.4**, and the
+  develop branch. Deployed and live-verified on moOde **10.2.4** with
+  **MPD 0.24.12** (Raspberry Pi 5, Pi OS bookworm, nginx + php-fpm).
+* The script auto-detects which path-quoting style the installed version uses
+  (`escapeDblQuotes()` exists only in newer versions) and generates the
+  matching code.
 * Before editing, the script validates both anchor strings; if the installed
-  moOde has drifted from both known layouts, it aborts without touching
+  moOde has drifted from all known layouts, it aborts without touching
   anything.
 * After patching it runs `php -l` and auto-restores the backup if the syntax
   check fails.

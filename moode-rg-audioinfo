@@ -19,7 +19,8 @@
 #   sudo ./moode-rg-audioinfo --status   # report installed or not
 #   sudo ./moode-rg-audioinfo --restore  # revert to the most recent backup
 #
-# Tested anchors against moOde r942 and develop (2026-09-26).
+# Tested anchors against moOde r942, 10.2.4, and develop (2026-09-26).
+# Live-verified on moOde 10.2.4 / MPD 0.24.12 (Pi5).
 # Before any edit the script validates both anchor strings exist; if the
 # installed moOde has drifted, it aborts without touching anything.
 
