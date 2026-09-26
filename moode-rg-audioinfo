@@ -80,10 +80,10 @@ do_install() {
 	cp -p "$TARGET" "$BACKUP" && echo "OK   Backup: $BACKUP"
 
 	# Patch (validate both anchors first, then apply) --------------------------
-	python3 - "$TARGET" "$OLD_LINE" "$FUNC_ANCHOR" <<'PYEOF'
+	python3 - "$TARGET" "$OLD_LINE" <<'PYEOF'
 import sys
 
-target, old_line, func_anchor = sys.argv[1], sys.argv[2], sys.argv[3]
+target, old_line = sys.argv[1], sys.argv[2]
 
 with open(target, 'r') as f:
     content = f.read()
@@ -144,11 +144,11 @@ with open(target, 'r') as f:
 
 if content.count(old_line) != 1:
     sys.exit('ABORT: anchor line count != 1')
-if content.count(func_anchor) != 1:
+if content.count('function parseTrackInfo($resp) {') != 1:
     sys.exit('ABORT: function anchor count != 1')
 
 content = content.replace(old_line, new_lines, 1)
-content = content.replace(func_anchor, func_code, 1)
+content = content.replace('function parseTrackInfo($resp) {', func_code, 1)
 
 with open(target, 'w') as f:
     f.write(content)
