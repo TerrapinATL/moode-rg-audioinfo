@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# moode-rg-audioinfo v1
+# Patch moOde so the "M" (Audio info) popup's TRACK tab also displays the
+# ReplayGain tags embedded in the currently selected file.
+#
+# What it changes: /var/www/command/audioinfo.php
+#   - MPD's lsinfo (used by the stock Track tab) does not expose REPLAYGAIN_*
+#     tags. The patch adds a second MPD query (readcomments) which returns the
+#     raw file tags, and appends up to five rows to the Track tab:
+#       RG Track gain / RG Track peak / RG Album gain / RG Album peak /
+#       RG Reference loudness
+#   - Rows appear only for files that actually carry the tags (your loudgain
+#     library); radio stations and untagged files are unaffected.
+#   - The Playback tab is NOT modified: it already shows moOde's MPD
+#     replaygain mode setting (Off / Track / Album).
+#
+# Usage (run ON the moOde Pi):
+#   sudo ./moode-rg-audioinfo install    # backup + patch + restart web services
+#   sudo ./moode-rg-audioinfo --status   # report installed or not
+#   sudo ./moode-rg-audioinfo --restore  # revert to the most recent backup
+#
+# Tested anchors against moOde r942 and develop (2026-09-26).
+# Before any edit the script validates both anchor strings exist; if the
+# installed moOde has drifted, it aborts without touching anything.
+
+set -u
+
+TARGET="/var/www/command/audioinfo.php"
+BACKUP_DIR="/var/backups/rg-audioinfo"
+MARKER="RG-AUDIOINFO-PATCH v1"
+
+# Old single line to replace (stable across moOde r942 and develop)
+OLD_LINE='echo json_encode(parseTrackInfo(readMpdResp($sock)));'
+
+banner() {
+	echo "========== $1 =========="
+}
+
+restart_web_services() {
+	banner "Restarting web services"
+	systemctl restart nginx 2>/dev/null && echo "OK   nginx restarted"
+	php_fpms=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null |
+		awk '$1 ~ /^php[0-9.]+-fpm\.service$/ {print $1}')
+	if [ -n "$php_fpms" ]; then
+		for svc in $php_fpms; do
+			systemctl restart "$svc" && echo "OK   $svc restarted"
+		done
+	else
+		echo "NOTE No running php-fpm service found (older moOde: lighttpd?)"
+		systemctl restart lighttpd 2>/dev/null && echo "OK   lighttpd restarted"
+	fi
+}
+
+abort_restore() {
+	echo "ERROR: $1"
+	echo "No changes were made."
+	exit 1
+}
+
+do_install() {
+	banner "moOde ReplayGain Audio Info patch (install)"
+
+	# Preconditions -----------------------------------------------------------
+	[ "$(id -u)" -eq 0 ] || { echo "ERROR: run with sudo"; exit 1; }
+	command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found"; exit 1; }
+	[ -f "$TARGET" ] || abort_restore "$TARGET not found - is moOde installed?"
+
+	if grep -q "appendReplayGainTags" "$TARGET"; then
+		echo "ALREADY INSTALLED - marker found in $TARGET"
+		echo "Nothing to do (run '--restore' first to reinstall cleanly)."
+		exit 0
+	fi
+
+	grep -cF "$OLD_LINE" "$TARGET" | grep -q '^1$' ||
+		abort_restore "anchor line not found (or found multiple times). Installed moOde version may not match."
+
+	# Backup ------------------------------------------------------------------
+	mkdir -p "$BACKUP_DIR"
+	BACKUP="$BACKUP_DIR/audioinfo.php.$(date +%Y%m%d-%H%M%S).orig"
+	cp -p "$TARGET" "$BACKUP" && echo "OK   Backup: $BACKUP"
+
+	# Patch (validate both anchors first, then apply) --------------------------
+	python3 - "$TARGET" "$OLD_LINE" "$FUNC_ANCHOR" <<'PYEOF'
+import sys
+
+target, old_line, func_anchor = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(target, 'r') as f:
+    content = f.read()
+
+# Version-safe path quoting: moOde r942 (and older) has no escapeDblQuotes();
+# newer versions (develop/9.4+) use it. Match whatever the installed lsinfo
+# line uses.
+if "escapeDblQuotes($_GET['path'])" in content:
+    path_expr = "escapeDblQuotes($_GET['path'])"
+else:
+    path_expr = "$_GET['path']"
+
+# NOTE: old_line has no leading tabs, so the replaced line's own indentation
+# (\t\t) is preserved. Only the SECOND new line needs explicit tabs.
+new_lines = (
+    "sendMpdCmd($sock, 'readcomments \"' . " + path_expr + " . '\"');\n"
+    "\t\techo json_encode(appendReplayGainTags(parseTrackInfo(readMpdResp($sock)), readMpdResp($sock)));"
+)
+func_code = '''// RG-AUDIOINFO-PATCH v1 (2026-09-26): ReplayGain rows for the Track tab.
+// MPD readcomments returns the raw tags stored in the file (lsinfo does not
+// expose REPLAYGAIN_* tags to clients). Appends up to five rows:
+//   RG Track gain / RG Track peak / RG Album gain / RG Album peak /
+//   RG Reference loudness
+// Rows appear only when the file carries the tags.
+function appendReplayGainTags($trackInfo, $resp) {
+\tif (is_null($resp)) {
+\t\treturn $trackInfo;
+\t}
+
+\t$rgLabels = array(
+\t\t'REPLAYGAIN_TRACK_GAIN' => 'RG Track gain',
+\t\t'REPLAYGAIN_TRACK_PEAK' => 'RG Track peak',
+\t\t'REPLAYGAIN_ALBUM_GAIN' => 'RG Album gain',
+\t\t'REPLAYGAIN_ALBUM_PEAK' => 'RG Album peak',
+\t\t'REPLAYGAIN_REFERENCE_LOUDNESS' => 'RG Reference loudness'
+\t);
+\t$rgRows = array();
+\t$line = strtok($resp, "\\n");
+\twhile ($line) {
+\t\tlist ($element, $value) = explode(': ', $line, 2);
+\t\tif (isset($rgLabels[$element])) {
+\t\t\t$rgRows[$rgLabels[$element]] = htmlspecialchars($value, ENT_NOQUOTES);
+\t\t}
+\t\t$line = strtok("\\n");
+\t}
+
+\tforeach ($rgRows as $label => $value) {
+\t\t$trackInfo[] = array($label => $value);
+\t}
+
+\treturn $trackInfo;
+}
+
+function parseTrackInfo($resp) {'''
+
+with open(target, 'r') as f:
+    content = f.read()
+
+if content.count(old_line) != 1:
+    sys.exit('ABORT: anchor line count != 1')
+if content.count(func_anchor) != 1:
+    sys.exit('ABORT: function anchor count != 1')
+
+content = content.replace(old_line, new_lines, 1)
+content = content.replace(func_anchor, func_code, 1)
+
+with open(target, 'w') as f:
+    f.write(content)
+
+print('PATCH APPLIED OK')
+PYEOF
+	[ $? -eq 0 ] || { echo "ERROR: patch script aborted - restoring backup"; cp -p "$BACKUP" "$TARGET"; exit 1; }
+
+	echo "OK   Patched: $TARGET"
+
+	# Sanity: PHP lint if php-cli is present -----------------------------------
+	if command -v php >/dev/null 2>&1; then
+		if php -l "$TARGET" >/dev/null 2>&1; then
+			echo "OK   php -l syntax check passed"
+		else
+			echo "ERROR: php -l FAILED - restoring backup"
+			cp -p "$BACKUP" "$TARGET"
+			php -l "$TARGET" 2>&1 | head -3
+			exit 1
+		fi
+	fi
+
+	restart_web_services
+
+	echo
+	echo "----------------------------------------"
+	echo "SUMMARY: ReplayGain tags will now appear on the"
+	echo "Audio info TRACK tab (M menu) for tagged files."
+	echo "Refresh the browser (F5) to pick up the change."
+	echo "----------------------------------------"
+}
+
+do_status() {
+	if grep -q "appendReplayGainTags" "$TARGET" 2>/dev/null; then
+		echo "INSTALLED"
+		ls -1 "$BACKUP_DIR" 2>/dev/null | sed 's/^/backup: /'
+	else
+		echo "NOT INSTALLED (or $TARGET missing)"
+	fi
+}
+
+do_restore() {
+	[ "$(id -u)" -eq 0 ] || { echo "ERROR: run with sudo"; exit 1; }
+	LATEST=$(ls -1t "$BACKUP_DIR"/audioinfo.php.*.orig 2>/dev/null | head -1)
+	[ -n "$LATEST" ] || { echo "ERROR: no backups found in $BACKUP_DIR"; exit 1; }
+	banner "Restoring moOde AudioInfo"
+	cp -p "$LATEST" "$TARGET" && echo "OK   Restored from: $LATEST"
+	restart_web_services
+}
+
+case "${1:-install}" in
+	install)   do_install ;;
+	--status)  do_status ;;
+	--restore) do_restore ;;
+	*) echo "Usage: sudo $0 [install|--status|--restore]"; exit 1 ;;
+esac
